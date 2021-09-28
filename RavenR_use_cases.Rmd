@@ -1,0 +1,414 @@
+---
+title: "RavenR: an open source R package to support flexible hydrologic modelling (code for figures)"
+author: "R. Chlumsky"
+date: "2021-09-27"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## `RavenR`: an open source R package to support flexible hydrologic modelling
+
+This document provides the R scripts required to reproduce the figures in the use cases (Section 3) of the `RavenR` manuscript, submitted in 2021. All R code and model files can be sourced from [Github](https://github.com/rchlumsk/RavenR_manuscript_2021) and on Zenodo.
+
+```{r load libraries}
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(ggpubr)
+library(xts)
+library(tidyhydat)
+library(weathercan)
+library(DiagrammeR)
+library(DiagrammeRsvg)
+library(RavenR)
+library(RColorBrewer)
+```
+
+### Download Liard Model and other files
+
+```{r Download Liard River model files, message=FALSE, warning=FALSE, eval=FALSE}
+## update to link to Github and/or Zenodo repository (https://github.com/rchlumsk/RavenR_manuscript_2021)
+
+browseURL("https://github.com/rchlumsk/RavenR_manuscript_2021")
+
+# download supporting files
+download.file(url="https://raw.githubusercontent.com/rchlumsk/RavenR_manuscript_2021/main/Liard_unclean.rvh",
+              destfile="Liard_unclean.rvh", mode="wb")
+download.file(url="https://raw.githubusercontent.com/rchlumsk/RavenR_manuscript_2021/main/observation_stations.csv",
+              destfile="observation_stations.csv", mode="wb")
+
+# download model files zip file as raw
+download.file(url="https://github.com/rchlumsk/RavenR_manuscript_2021/blob/main/LiardRiverModel.zip?raw=true",
+              destfile="LiardRiverModel_test.zip")
+
+# unzip LiardRiverModel.zip
+if (file.exists(paste0(getwd(),"/","LiardRiverModel.zip"))) {
+  # dir.create(paste0(outdir,"/","LiardRiverModel"))
+  unzip(paste0(getwd(),"/","LiardRiverModel.zip"), exdir=paste0(getwd(),"/","LiardRiverModel"))
+}
+
+# create figures folder if it does not exist
+if (!dir.exists("figures")) {
+  dir.create("figures")
+}
+```
+
+```{r download Raven and run Liard model if needed, message=FALSE, warning=FALSE, eval=FALSE}
+# download Raven.exe from raven.uwaterloo.ca, store in RavenR extdata folder
+## may require compilation of Raven.exe if not using Windows OS
+rvn_download()
+
+# run Raven Liard model, outputting to output_new for demonstration purposes
+## produces same output as in the existing output folder
+rvn_run(fileprefix="Liard", indir="./LiardRiverModel/",
+        outdir="./LiardRiverModel/output_new/",
+        showoutput=TRUE)
+```
+
+
+### Section 3.2 - Input file processing
+
+#### Section 3.2.1 - Model configuration
+
+```{r model configuration - rvi process plot}
+d2 <- rvn_rvi_read("./LiardRiverModel/Liard.rvi") %>% 
+  rvn_rvi_connections() %>% 
+rvn_rvi_process_diagrammer(rvi_conn = ., lbl_size = 0.6)
+
+# optionally, render graph
+DiagrammeR::render_graph(d2)
+
+d2 %>% 
+  export_graph(file_name="./figures/rvi_process_diagrammer_Liard.pdf")
+```
+
+#### Section 3.2.2 - Forcing data
+
+```{r forcing data - rvt met files}
+# define coordaintes for station search (lat/long)
+fort_liard <- c(60.241711, -123.467377)
+stns <- weathercan::stations_search(coords=fort_liard, interval="day", 
+                            dist = 500, starts_latest = 1985, ends_earliest = 2006)
+
+# download 10 nearest stations for 1985-2005 inclusive
+metdata <- weather_dl(stns$station_id[1:10], start="1985-10-01", end="2005-10-01", interval="day")
+
+# interpolate missing values for the first 5 stations using data from all 10
+## select for only the data columns we want to write to file - i.e. exclude non-interpolated data columns
+metdata_interpolated <- metdata %>% 
+  dplyr::select(station_name, station_id, lat, lon, elev, date, max_temp, min_temp, total_precip) %>%
+  rvn_met_interpolate(cc=c("max_temp", "min_temp", "total_precip"), 
+                      key_stn_ids = stns$station_id[1:5])
+  
+# write rvt files, including met_stndata.rvt
+metdata_interpolated %>% 
+  rvn_rvt_write_met()
+```
+
+#### Section 3.2.3 - Observation data
+
+```{r observation data - rvt streamflow observation files}
+# read in desired stations and their model subbasin IDs
+obs_stns <- read.csv("observation_stations.csv")
+  
+# download daily flow data using tidyhydatgithub
+hd <- tidyhydat::hy_daily_flows(station_number = obs_stns$stnID,
+ start_date = "1985-01-01")
+
+# Create RVT files - write locally with default names
+rvn_rvt_tidyhydat(hd, subIDs=obs_stns$subID)
+```
+
+#### Section 3.2.3 - Model discretization file
+
+```{r model discretization file - HRU cleaning for subbasin 3}
+
+#Directory with uncleaned rvh
+rvh_unclean <- rvn_rvh_read("Liard_unclean.rvh")
+unclean_hrus <- rvh_unclean$HRUtable
+unclean_subs <- rvh_unclean$SBtable
+
+# number of uncleaned HRUs
+nrow(unclean_hrus)
+
+#Subset to subbasin 3
+unclean_subs_3 <- subset(unclean_subs, unclean_subs$SBID==3)
+unclean_hrus_3 <- subset(unclean_hrus, unclean_hrus$SBID==3)
+
+# number just in subbasin 3
+nrow(unclean_hrus_3)
+
+# check all hrus
+unclean_hrus_3$LandUse %>% unique()
+
+#Set protected hrus to any hru which is a wetland OR water type
+protected_hrus <- unclean_hrus_3$ID[(unclean_hrus_3$LandUse=="WETLAND" | 
+                                     unclean_hrus_3$LandUse=="WATER")]
+
+# Set locked hrus to glacier type
+locked_hrus <- unclean_hrus_3$ID[(unclean_hrus_3$LandUse=="GLACIER")]
+
+#Clean HRUs based on area tolerance equal to 0.5%
+#Reduces number of HRUs in subbasin 3 from 172 to 87
+clean_hrus_v1 <- rvn_rvh_cleanhrus(HRUtab=unclean_hrus_3, 
+                                   SBtab=unclean_subs_3, 
+                                   area_tol = 0.005, 
+                                   ProtectedHRUs = protected_hrus,
+                                   LockedHRUs = locked_hrus,
+                                   merge = TRUE)
+
+#Increase area tolerance to 2%
+#Reduces number of HRUs in subbasin 3 from 172 to 44
+clean_hrus_v2 <- rvn_rvh_cleanhrus(HRUtab=unclean_hrus_3, 
+                                   SBtab=unclean_subs_3, 
+                                   area_tol = 0.02, 
+                                   ProtectedHRUs = protected_hrus,
+                                   LockedHRUs = locked_hrus,
+                                   merge = TRUE)
+
+# check total areas
+unclean_hrus_3$Area %>% sum()
+clean_hrus_v1$Area %>% sum()
+clean_hrus_v2$Area %>% sum()
+
+#Create Plots to Show how distribution of land cover, elevation , aspect and slope changes
+unclean_hrus_3$Type <- "Uncleaned"
+clean_hrus_v1$Type <- "Cleaned 0.5% Area Tolerance"
+clean_hrus_v2$Type <- "Cleaned 2.0% Area Tolerance"
+
+all_hrus <- rbind(unclean_hrus_3, clean_hrus_v1, clean_hrus_v2)
+all_hrus$Type <- factor(all_hrus$Type, levels = c("Uncleaned","Cleaned 0.5% Area Tolerance","Cleaned 2.0% Area Tolerance"))
+
+## checks changes in land use numerically
+all_hrus %>% 
+  group_by(LandUse,Type) %>% 
+  summarise(Area=sum(Area))
+
+# Plot distribution of land class
+p1 <- all_hrus %>% 
+  ggplot()+
+  geom_bar(aes(x=LandUse, y=Area, fill = Type), stat = "summary", position = "dodge", fun="sum")+
+  scale_fill_grey(name="Clean Type", labels=c("Uncleaned","0.5% Area\nTolerance", "2.0% Area\nTolerance"))+
+  labs(x = 'Land Class', y = expression(paste('Area (', km^2, ')')))+
+  theme_bw()+
+  theme(legend.key.size = unit(1.2, "cm"))+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+  
+p1 
+
+p1 %>% 
+  ggsave(filename="./figures/rvh_cleanhrus_Liard.pdf",
+       plot=., units="in",width=6,height=4)
+```
+
+
+### Section 3.3 - Output file processing and analysis
+
+### Section 3.3.1 - Evaluation of model realism
+
+```{r evaluation of model realism}
+
+## Budyko plot - plot 1 ----
+
+# add :WriteForcingFunctions and :WriteMassBalanceFile to rvi, plot buydko curve
+# note: can alternatively get AET, PET, PRECIP by using custom output
+# AET_Daily_Average_ByWatershed;
+
+wstor <- rvn_watershed_read("./LiardRiverModel/output/WatershedStorage.csv")
+ff <- rvn_forcings_read("./LiardRiverModel/output/ForcingFunctions.csv")
+
+precip <- ff$forcings$rain+ff$forcings$snow
+pet <- ff$forcings$PET
+aet <- diff.xts(x=wstor$watershed_storage$Cum..Losses.to.Atmosphere..mm.,
+                k=1, na.pad=TRUE)
+aet[1] <- 0
+
+x <- merge.xts(precip,pet,aet)
+names(x) <- c("precip","pet","aet")
+
+p1 <- rvn_budyko_plot(x=x, budyko_curve = TRUE, limiting_labels = FALSE) +
+  annotate("text",x=-Inf,y=Inf,label="(A)",fontface="bold",size=6, hjust=-0.1,vjust=1.2)
+
+p1
+
+
+## regime curve plot 2 ----
+
+rvh <- rvn_rvh_read("./LiardRiverModel/Liard.rvh")
+Liard_DA <- rvh$SBtable[rvh$SBtable$SBID == 63, ]$TotalUpstreamArea * 1e6 # m2
+
+qq <- rvn_hyd_read("./LiardRiverModel/output/Hydrographs.csv") %>% 
+  rvn_hyd_extract(subs="SUB_63", hyd=.) 
+
+# convert m3/s to mm/d
+qq_mmd <- qq*36400*1000/Liard_DA
+
+# merge and process
+regime_xx <- merge.xts(qq_mmd, x)
+
+regime_monthly_df <- apply.monthly(regime_xx, mean, na.rm=TRUE) %>% 
+  rvn_fortify_xts() %>% 
+  mutate(Month = lubridate::month(Date), Year = lubridate ::year(Date)) %>% 
+  group_by(Month) %>% 
+  summarise_all(mean)
+
+p2 <- regime_monthly_df %>% 
+  select(Month,sim,obs,precip,pet,aet) %>% 
+  pivot_longer(cols=-Month, names_to="regime_type",values_to="regime_value") %>% 
+ggplot(data=., aes(x=Month, y=regime_value, color=regime_type))+
+  geom_line(lwd=1.2)+
+  rvn_theme_RavenR()+
+  ylab("Depth (mm)")+
+  scale_x_continuous(breaks=seq(1,12),
+                     expand=c(0,0))+
+  theme(legend.position = c(0.86, 0.73),
+        legend.background = element_rect(fill = "white", color = "black"))+
+  scale_colour_manual(values=brewer.pal(5,"Set2"))+
+  # annotate("text",x=2,y=3.2,label="(B)",fontface="bold",size=6, hjust=0)
+  annotate("text",x=-Inf,y=Inf,label="(B)",fontface="bold",size=6, hjust=-0.1,vjust=1.2)+
+  theme(legend.key.size = unit(0.5, 'cm'))
+
+p2
+  
+
+## soil storage stationarity checks - plot 3 ----
+
+prd <- "1987-10-01/1996-06-01"
+
+# note: can also use the CustomOutput to get soil moisture outputs
+wstor <- rvn_watershed_read("./LiardRiverModel/output/WatershedStorage.csv")
+
+# change parameter in just one subbasin and check
+p3 <- rvn_fortify_xts(wstor$watershed_storage[prd]) %>% 
+  select(Date,starts_with("Soil")) %>% 
+  pivot_longer(cols=starts_with("Soil"), 
+               names_to="soil_number",
+               values_to="soil_storage") %>% 
+  ggplot()+
+  geom_line(aes(x=Date, y=soil_storage, linetype=soil_number, color=soil_number))+
+  ylab("Soil Storage (mm)")+
+  rvn_theme_RavenR()+
+  # scale_colour_discrete(name="Legend") +
+  scale_linetype_manual(name="Soil Layer", values=c(1,2,1,2),
+                        labels=as.character(seq(1,4))) +
+  scale_color_manual(name="Soil Layer", values=brewer.pal(n=4, "Set2"),
+                     labels=as.character(seq(1,4)))+
+  # theme()+
+  guides(color = guide_legend(override.aes = list(size = 1)))+
+  theme(legend.background = element_rect(fill = "white", color = "black"),
+        legend.direction = "vertical",
+        legend.box = "horizontal",
+        legend.position = c(0.79,0.975), # c(0.025,0.975)
+        legend.justification = c(0, 1),
+        legend.key.size=unit(0.12,"in"))+
+  theme(legend.title=element_text(size=8))+
+  guides(color = guide_legend(override.aes = list(size = 1)))+
+  annotate("text",x=as.Date("1987-10-01"),y=60,label="(C)",fontface="bold",size=6, hjust=0.4, vjust=-0.7)
+
+p3
+
+
+## snow plots - plot 4 ---- 
+
+# read in snow custom output
+snow <- rvn_custom_read("./LiardRiverModel/output/SNOW_Daily_Average_ByHRU.csv", no_runname = TRUE)
+names(snow) <- sprintf("HRU_%s",names(snow))
+
+# read in observed snow
+snow_obs <- read.csv("./LiardRiverModel/data_obs/Snow/Frances River.csv")
+snow_obs$Date <- as.Date(snow_obs$Date, format = "%m/%d/%Y")
+snow_obs_xts <- xts(snow_obs$SWE, order.by=snow_obs$Date)
+names(snow_obs_xts) = c("snow_obs")
+
+# create plot
+p4 <-
+  snow$HRU_819[prd] %>% 
+  rvn_fortify_xts() %>% 
+  ggplot()+
+  geom_line(aes(x=Date, y=HRU_819, colour="Simulated", linetype="Simulated"))+
+  geom_point(aes(x=Date, y=HRU_819, colour="Simulated", shape="Simulated"))+
+  geom_point(data=rvn_fortify_xts(snow_obs_xts[prd]),
+                aes(x=Date,y=snow_obs,colour="Observed", shape="Observed"))+
+  scale_color_manual(name="Legend",values=c("Simulated"="darkgrey","Observed"="black"))+
+  scale_linetype_manual(name="Legend",values=c("Simulated"="solid","Observed"="blank"))+
+  scale_shape_manual(name="Legend",values=c("Simulated"=NA,"Observed"=19))+
+  ylab("Snow SWE (mm)")+
+  rvn_theme_RavenR()+
+  theme(legend.background = element_rect(fill = "white", color = "black"),
+        legend.direction = "vertical",
+        legend.box = "horizontal",
+        legend.position = c(0.7,0.975), # c(0.025,0.975)
+        legend.justification = c(0, 1),
+        legend.key.size=unit(0.15,"in"))+
+  annotate("text",x=as.Date("1988-01-01"),y=300,label="(D)",fontface="bold",size=6, hjust=0.7, vjust=-0.0)
+
+p4
+
+# print party figure realism plots to file
+list(p1,p2,p3,p4) %>% 
+ggarrange(plotlist=., ncol=2, nrow=2, common.legend=FALSE,
+          align='hv') %>% 
+ggsave(filename="./figures/mixed_custom_checks_Liard.pdf",
+       plot=.,
+         units="in",
+          width=8,height=6)
+```
+
+### Section 3.3.2 - Evaluation of model performance
+
+```{r evaluation of model performance}
+
+hyd <- rvn_hyd_read("./LiardRiverModel/output/Hydrographs.csv")
+sub63 <- rvn_hyd_extract(subs="SUB_63",hyd = hyd)
+
+p1 <- rvn_hyd_plot(sim=sub63$sim, obs=sub63$obs,
+             prd="1989-03-01/1992-12-01",
+             winter_shading = FALSE)+
+  scale_colour_manual(name='Legend',values=c("Obs"='black',"Sim"='darkorange'))+
+  annotate("text",x=as.Date("1989-02-01"),y=14000,label="(A)",fontface="bold",size=6, hjust=0.3, vjust=0.2)
+
+p1
+
+p2 <- rvn_annual_peak(sim=sub63$sim, obs=sub63$obs)$p1+
+  theme(legend.position = 'none')+
+  annotate("text",x=-Inf,y=Inf,label="(B)",fontface="bold",size=6, hjust=-0.1,vjust=1.2)
+
+p2
+
+# plot with axis labels reduced for p3
+xx <- seq(1986,2005)
+xx_lbl <- xx
+xx_lbl[which(xx %in% (seq(1986,2005,by=2)+1))] <- NA
+xx_lbl <- as.character(xx_lbl)
+xx_lbl[which(is.na(xx_lbl))] <- ""
+
+p3 <- rvn_annual_peak_timing_error(sim=sub63$sim, obs=sub63$obs, add_labels = TRUE)$p1+
+  theme(legend.position = 'none')+
+  annotate("text",x=-Inf,y=Inf,label="(C)",fontface="bold",size=6, hjust=-0.1,vjust=1.2)+
+  scale_x_discrete(breaks=xx,
+        labels=as.character(xx_lbl))
+
+p3
+
+p4 <- rvn_cum_plot_flow(sim=sub63$sim["1989-03-01/1992-12-01"], obs=sub63$obs["1989-03-01/1992-12-01"])+
+  scale_colour_manual(values=c('black','darkorange')) +
+  theme(legend.position = 'none')+
+  # annotate("text",x=-Inf,y=Inf,label="(E)",fontface="bold",size=6, hjust=-0.1,vjust=1.2)
+  annotate("text",x=as.POSIXct("1989-04-01"),y=1e11,label="(D)",fontface="bold",size=6, hjust=0.5, vjust=0.2)
+
+p4
+
+# print party figure diagnostic plots to file
+list(p1,p2,p3,p4) %>% 
+ggarrange(plotlist=., ncol=2, nrow=2, common.legend=TRUE,
+          align='hv', legend='bottom') %>% 
+ggsave(filename="./figures/mixed_diagnostic_plots_Liard.pdf",
+       plot=.,
+         units="in",
+          width=8,height=6)
+```
