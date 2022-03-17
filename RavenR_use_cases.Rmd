@@ -144,7 +144,8 @@ unclean_hrus_3 <- subset(unclean_hrus, unclean_hrus$SBID==3)
 nrow(unclean_hrus_3)
 
 # check all hrus
-unclean_hrus_3$LandUse %>% unique()
+all_hru_types <- unclean_hrus_3$LandUse %>% unique()
+all_hru_types
 
 #Set protected hrus to any hru which is a wetland OR water type
 protected_hrus <- unclean_hrus_3$ID[(unclean_hrus_3$LandUse=="WETLAND" | 
@@ -152,6 +153,13 @@ protected_hrus <- unclean_hrus_3$ID[(unclean_hrus_3$LandUse=="WETLAND" |
 
 # Set locked hrus to glacier type
 locked_hrus <- unclean_hrus_3$ID[(unclean_hrus_3$LandUse=="GLACIER")]
+
+#Clean HRUs based on area tolerance equal to 0.5%, no locked or protected HRUs
+#Reduces number of HRUs in subbasin 3 from 172 to 56
+clean_hrus_v0 <- rvn_rvh_cleanhrus(HRUtab=unclean_hrus_3, 
+                                   SBtab=unclean_subs_3, 
+                                   area_tol = 0.005, 
+                                   merge = TRUE)
 
 #Clean HRUs based on area tolerance equal to 0.5%
 #Reduces number of HRUs in subbasin 3 from 172 to 87
@@ -173,27 +181,37 @@ clean_hrus_v2 <- rvn_rvh_cleanhrus(HRUtab=unclean_hrus_3,
 
 # check total areas
 unclean_hrus_3$Area %>% sum()
+clean_hrus_v0$Area %>% sum()
 clean_hrus_v1$Area %>% sum()
 clean_hrus_v2$Area %>% sum()
 
 #Create Plots to Show how distribution of land cover, elevation , aspect and slope changes
-unclean_hrus_3$Type <- "Uncleaned"
-clean_hrus_v1$Type <- "Cleaned 0.5% Area Tolerance"
-clean_hrus_v2$Type <- "Cleaned 2.0% Area Tolerance"
+type_levels <- c("Uncleaned", "Cleaned_v0", "Cleaned_v1","Cleaned_v2")
+unclean_hrus_3$Type <- factor(type_levels[1], levels=type_levels)
+clean_hrus_v0$Type <- factor(type_levels[2], levels=type_levels)
+clean_hrus_v1$Type <- factor(type_levels[3], levels=type_levels)
+clean_hrus_v2$Type <- factor(type_levels[4], levels=type_levels)
 
-all_hrus <- rbind(unclean_hrus_3, clean_hrus_v1, clean_hrus_v2)
-all_hrus$Type <- factor(all_hrus$Type, levels = c("Uncleaned","Cleaned 0.5% Area Tolerance","Cleaned 2.0% Area Tolerance"))
+# template for all hrus (all land use types and cleaning types)
+all_hrus_template <- data.frame(expand.grid(type_levels,all_hru_types))
+colnames(all_hrus_template) <- c("Type","LandUse")
 
 ## checks changes in land use numerically
-all_hrus %>% 
+all_hrus_data <- 
+rbind(unclean_hrus_3, clean_hrus_v0, clean_hrus_v1, clean_hrus_v2) %>% 
   group_by(LandUse,Type) %>% 
-  summarise(Area=sum(Area))
+  summarise(Area=sum(Area)) %>% 
+  data.frame()
+
+# create all hrus by merging, preserving zero-area landuse types in the data frame
+all_hrus <- merge(all_hrus_template, y=all_hrus_data, by=c("Type","LandUse"), all.x=TRUE)
+all_hrus[is.na(all_hrus$Area),]$Area <- 0
 
 # Plot distribution of land class
 p1 <- all_hrus %>% 
   ggplot()+
   geom_bar(aes(x=LandUse, y=Area, fill = Type), stat = "summary", position = "dodge", fun="sum")+
-  scale_fill_grey(name="Clean Type", labels=c("Uncleaned","0.5% Area\nTolerance", "2.0% Area\nTolerance"))+
+  scale_fill_grey(name="Clean Type", labels=c("Uncleaned","0.5% Area\nTolerance\n(Basic)","0.5% Area\nTolerance", "2.0% Area\nTolerance"))+
   labs(x = 'Land Class', y = expression(paste('Area (', km^2, ')')))+
   theme_bw()+
   theme(legend.key.size = unit(1.2, "cm"))+
